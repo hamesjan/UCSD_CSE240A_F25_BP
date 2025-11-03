@@ -70,6 +70,23 @@ void train_predictor(uint32_t pc, uint32_t target, uint32_t outcome, uint32_t co
 // Please add your code below, and DO NOT MODIFY ANY OF THE CODE ABOVE
 // 
 
+#define LOCAL 0
+#define GLOBAL 0
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+/*
+
+111 
+110
+101
+100
+011
+010
+001
+000 
+
+*/
+
 
 
 #endif
