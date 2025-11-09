@@ -156,5 +156,9 @@ int main(int argc, char *argv[])
   fclose(stream);
   free(buf);
 
+  if (bpType == CUSTOM) {
+    cleanup_custom();
+  }
+
   return 0;
 }

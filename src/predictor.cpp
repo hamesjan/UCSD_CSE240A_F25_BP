@@ -9,6 +9,11 @@
 #include <math.h>
 #include "predictor.h"
 #include <algorithm>
+
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include "tage_state.h" 
 //
 // TODO:Student Information
 //
@@ -49,15 +54,33 @@ uint8_t *ght_tournament;
 uint16_t global_tournament_history;
 uint8_t *choice_tournament;
 
-// custom
 
-uint8_t bht_bits = 11; 
-uint8_t ght_bits = 13;
-uint16_t *bht_custom;
-uint8_t *bht_custom_ctrs;
-uint8_t *ght_custom;
-uint16_t global_custom_history;
-uint8_t *choice_custom;
+/*
+custom
+*/
+
+// Storage budget 64KB -> 2^16 bits
+
+uint64_t tage_ght[4];
+uint16_t tage_pht; // 16 bit, will record 1 address bit for each address. add LSB of PC
+
+uint16_t t0_entries = 1 << 12; // 2 ^ 16 - 4
+uint16_t tx_entries = 1 << 10; // 2 ^ 16 - 6 
+uint8_t num_components = 4;
+
+uint8_t *tage_t0; // 4096 entries, bimodal 
+uint16_t *tage_component_tags;
+uint16_t *tage_components[4];  // 1024 entries each, // tag width - 9 bits
+uint8_t *tage_pred_ctrs; // 3 bit, MSB provides prediction
+uint8_t *tage_pred_ctrs_component[4];
+uint8_t *tage_useful_ctrs; // 2bit, unsigned. 
+uint8_t *tage_useful_component[4];
+
+uint8_t L1 = 2;
+uint8_t alpha = 2;
+uint8_t L2 = 0;
+uint8_t L3 = 0;
+uint8_t L4 = 0;
 
 //------------------------------------//
 //        Predictor Functions         //
@@ -122,41 +145,65 @@ void init_tournament()
 
 void init_custom()
 {
-  int bht_entries = 1 << bht_bits; // 2048 = 2^11
-  bht_custom = (uint16_t *)malloc(bht_entries * sizeof(uint16_t));  
-  bht_custom_ctrs = (uint8_t *)malloc(bht_entries * sizeof(uint8_t));
-  int ght_entries = 1 << ght_bits; // 8192 = 2^13
-  ght_custom = (uint8_t *)malloc(ght_entries * sizeof(uint8_t)); 
-  choice_custom = (uint8_t *)malloc(ght_entries * sizeof(uint8_t)); 
 
-  int i = 0;
-  for (i = 0; i < bht_entries; i++)
-  {
-    bht_custom[i] = 0;
-    bht_custom_ctrs[i] = 3; // Weakly not taken
+  /*
+// Storage budget 64KB -> 2^16 bits
+uint64_t tage_ght[4];
+uint16_t tage_pht; // 16 bit, will record 1 address bit for each address. add LSB of PC
+uint16_t t0_entries = 1 << 12; // 2 ^ 16 - 4
+uint16_t tx_entries = 1 << 10; // 2 ^ 16 - 6 
+uint8_t *tage_t0; // 4096 entries, bimodal 
+uint16_t *tage_component_tags;
+uint16_t *tage_components[4];  // 1024 entries each, // tag width - 9 bits
+uint8_t *tage_pred_ctrs; // 3 bit, MSB provides prediction
+uint8_t *tage_ored_ctrs_component[4];
+uint8_t *tage_useful_ctrs // 2bit, unsigned. 
+uint8_t *tage_useful_component[4];
+
+  */
+
+  tage_t0 = (uint8_t *)malloc(t0_entries * sizeof(uint8_t));  
+  tage_component_tags = (uint16_t *)malloc(tx_entries * num_components * sizeof(uint16_t)); // 5 component tage predictor, 4 predictor tables + t0
+  tage_pred_ctrs = (uint8_t *)malloc(tx_entries * num_components * sizeof(uint8_t));
+  tage_useful_ctrs = (uint8_t *)malloc(tx_entries * num_components * sizeof(uint8_t));
+
+  for (int i = 0; i < num_components; i++) {
+    tage_components[i] = tage_component_tags + (i * tx_entries);
+    tage_pred_ctrs_component[i] = tage_pred_ctrs + (i * tx_entries);
+    tage_useful_component[i] = tage_useful_ctrs + (i * tx_entries);
+    tage_ght[i] = 0;
   }
 
-  i = 0;
-  for (i = 0; i < ght_entries; i++)
+  // bimodal base
+  for (int i = 0; i < t0_entries; i++)
   {
-    ght_custom[i] = WN; // Weakly not taken
-    choice_custom[i] = WN; // Weakly not taken
-  } 
+    tage_t0[i] = WN;
+  }
 
-  global_custom_history = 0; // should be 12 bits of past global history, indexes into ght and choice
-
-  // actual hardware budget usage
-  /*
+  // setting L values for all predictor components
+  L2 = (uint8_t)round(L1 * pow(alpha, 1)); 
+  L3 = (uint8_t)round(L1 * pow(alpha, 2));
+  L4 = (uint8_t)round(L1 * pow(alpha, 3));
   
-  bht_custom = 11 * 2048 = 22kb
-  bht_custom_ctrs = 3 * 2048 = 6 kb
-  ght_custom = 2 * 8192 = 16 kb
-  choice_custom = 2 * 8192 = 16 kb
-
-  total ~ 60kb
-
-  budget = 64kb + 1024 bits
-  */
+  tage_pht = 0;
+  // on init, load previous tage state stored in tage_state.h
+  #if defined(TAGE_STATE_VALID)
+    // If tage_state.h exists and defines this macro, load previous state
+    memcpy(tage_t0, tage_t0_saved, t0_entries);
+    memcpy(tage_component_tags, tage_tags_saved, num_components * tx_entries * sizeof(uint16_t));
+    memcpy(tage_pred_ctrs, tage_pred_saved, num_components * tx_entries);
+    memcpy(tage_useful_ctrs, tage_useful_saved, num_components * tx_entries);
+    memcpy(tage_ght, tage_ght_saved, sizeof(uint64_t) * num_components);
+    tage_pht = tage_pht_saved;
+  #else
+      // Else initialize fresh
+      memset(tage_t0, 0, t0_entries);
+      memset(tage_component_tags, 0, num_components * tx_entries * sizeof(uint16_t));
+      memset(tage_pred_ctrs, 0, num_components * tx_entries);
+      memset(tage_useful_ctrs, 0, num_components * tx_entries);
+      memset(tage_ght, 0, sizeof(uint64_t) * num_components);
+      tage_pht = 0;
+  #endif
 
 }
 
@@ -215,35 +262,89 @@ uint8_t tournament_predict(uint32_t pc){
 }
 
 
+
+uint16_t pred_hash_idx(uint32_t pc, int L) {
+    const int idx_bits = 10; // 1024 entries, so need 10 bits for idx
+    uint16_t folded = 0;
+    int pos = 0;
+
+    // XOR-fold the last L bits of the global history
+    for (int i = 0; i < L; i++) {
+        int word = i / 64;
+        int offset = i % 64;
+        uint8_t bit = (tage_ght[word] >> offset) & 1ULL;
+        folded ^= (bit << (pos % idx_bits));
+        pos++;
+    }
+    // Hash with PC
+    uint16_t pc_lower_ten = pc & ((1 << idx_bits) - 1);
+    uint16_t index = (folded ^ pc_lower_ten) & ((1 << idx_bits) - 1); // mask
+    return index;
+}
+
+uint16_t pred_hash_tag(uint32_t pc, int L) {
+    const int tag_bits = 9; // 1024 entries, so need 10 bits for idx
+    uint16_t folded = 0;
+    int pos = 0;
+    // XOR-fold the last L bits of the global history
+    for (int i = 0; i < L; i++) {
+        int word = i / 64;
+        int offset = i % 64;
+        uint8_t bit = (tage_ght[word] >> offset) & 0x01;
+        folded ^= (bit << (pos % tag_bits));
+        pos++;
+    }
+    // Hash with PC
+    uint16_t pc_lower_nine = pc & ((1 << tag_bits) - 1);
+    uint16_t index = (folded ^ pc_lower_nine) & ((1 << tag_bits) - 1); // mask
+    return index;
+}
+
 uint8_t custom_predict(uint32_t pc){
-  uint32_t bht_entries = 1 << bht_bits;
-  uint32_t ght_entries = 1 << ght_bits;
-  uint32_t pc_lower_bits = pc & (bht_entries - 1);
-  uint16_t global_custom_history_lower_bits = global_custom_history & (ght_entries - 1);
+  uint16_t t0_idx = pc & (t0_entries - 1);
 
-  uint8_t choice = choice_custom[global_custom_history_lower_bits];
+  uint16_t t1_idx = pred_hash_idx(pc, L1);
+  uint16_t t2_idx = pred_hash_idx(pc, L2);
+  uint16_t t3_idx = pred_hash_idx(pc, L3);
+  uint16_t t4_idx = pred_hash_idx(pc, L4);
 
-  if (choice < 2){
-    // use local
-    uint16_t bht_pattern = bht_custom[pc_lower_bits];
-    uint16_t local_ctr = bht_custom_ctrs[bht_pattern];
+  uint16_t t1_tag = pred_hash_tag(pc, L1);
+  uint16_t t2_tag = pred_hash_tag(pc, L2);
+  uint16_t t3_tag = pred_hash_tag(pc, L3);
+  uint16_t t4_tag = pred_hash_tag(pc, L4);
 
-    if (local_ctr < 4){
+
+  uint16_t idx_list[4] = {t1_idx, t2_idx, t3_idx, t4_idx};
+  uint16_t tag_list[4] = {t1_tag, t2_tag, t3_tag, t4_tag};
+
+  // walk down
+  int provider_component = -1;
+  for (int i = num_components - 1; i >= 0; i--){
+    if (tage_components[i][idx_list[i]] == tag_list[i]) {
+        provider_component = i;
+        break; 
+    }
+  }
+
+  // use base predictor
+  if (provider_component < 0){
+    if (tage_t0[t0_idx] < 2){
       return NOTTAKEN;
     } else {
       return TAKEN;
     }
   } else {
-    // use global
-    uint8_t global_prediction = ght_custom[global_custom_history_lower_bits];
-    if (global_prediction < 2){
+    // use chosen predictor
+    if (tage_pred_ctrs_component[provider_component][idx_list[provider_component]] < 4){
       return NOTTAKEN;
-    }  else {
+    } else {
       return TAKEN;
     }
+
   }
 
-  return 0;
+
+  return NOTTAKEN;
 }
 
 
@@ -329,49 +430,7 @@ void train_tournament(uint32_t pc, uint8_t outcome)
 
 void train_custom(uint32_t pc, uint8_t outcome)
 {
-  uint32_t bht_entries = 1 << bht_bits;
-  uint32_t pc_lower_bits = pc & (bht_entries - 1);
-  uint32_t ght_entries = 1 << ght_bits;
-  uint32_t global_custom_history_lower_bits = global_custom_history & (ght_entries - 1);
-  uint8_t choice = choice_custom[global_custom_history_lower_bits] < 2 ? LOCAL : GLOBAL;
-
-  uint8_t bht_prediction = bht_custom_ctrs[bht_custom[pc_lower_bits]] > 3 ? TAKEN : NOTTAKEN;
-  uint8_t ght_prediction = ght_custom[global_custom_history_lower_bits] > 1 ? TAKEN: NOTTAKEN;
-
-  // update predictors
-  if (outcome == TAKEN){
-    if (bht_custom_ctrs[bht_custom[pc_lower_bits]] < 7){
-        bht_custom_ctrs[bht_custom[pc_lower_bits]]++;
-    }
-    if (ght_custom[global_custom_history_lower_bits] < 3){
-         ght_custom[global_custom_history_lower_bits]++;
-      }
-  } else {
-    if (bht_custom_ctrs[bht_custom[pc_lower_bits]] > 0){
-        bht_custom_ctrs[bht_custom[pc_lower_bits]]--;
-      }
-    if (ght_custom[global_custom_history_lower_bits] > 0){
-        ght_custom[global_custom_history_lower_bits]--;
-      }
-  }
-
-  // update choice
-  if (bht_prediction != ght_prediction){
-    if (outcome == bht_prediction){
-      if (choice_custom[global_custom_history_lower_bits] > 0){
-        choice_custom[global_custom_history_lower_bits]--;
-      }
-
-    } else {
-      if (choice_custom[global_custom_history_lower_bits] < 3){
-        choice_custom[global_custom_history_lower_bits]++;
-      }
-    }
-  }
-
-  bht_custom[pc_lower_bits] = (bht_custom[pc_lower_bits] << 1) | outcome;
-  // update global_tournament_history
-  global_custom_history = ((global_custom_history << 1) | outcome);
+  return;
 }
 
 
@@ -395,19 +454,49 @@ void cleanup_tournament()
 
 }
 
-void cleanup_custom()
-{
-  free(bht_custom);
-  free(bht_custom_ctrs);
-  free(ght_custom);
-  free(choice_custom);
+void cleanup_custom() {
+    FILE *fp = fopen("tage_state.h", "w");
+    if (!fp) return;
 
-  bht_custom = NULL;
-  bht_custom_ctrs = NULL;
-  ght_custom = NULL;
-  choice_custom = NULL;
+    fprintf(fp, "#ifndef __TAGE_STATE_H__\n#define __TAGE_STATE_H__\n");
+    fprintf(fp, "#define TAGE_STATE_VALID\n\n");
 
+    fprintf(fp, "static uint8_t tage_t0_saved[%d] = {", 1 << 12);
+    for (int i = 0; i < (1 << 12); i++)
+        fprintf(fp, "%u,", tage_t0[i]);
+    fprintf(fp, "};\n\n");
+
+    fprintf(fp, "static uint16_t tage_tags_saved[%d] = {", num_components * (1 << 10));
+    for (int i = 0; i < num_components * (1 << 10); i++)
+        fprintf(fp, "%u,", tage_component_tags[i]);
+    fprintf(fp, "};\n\n");
+
+    fprintf(fp, "static uint8_t tage_pred_saved[%d] = {", num_components * (1 << 10));
+    for (int i = 0; i < num_components * (1 << 10); i++)
+        fprintf(fp, "%u,", tage_pred_ctrs[i]);
+    fprintf(fp, "};\n\n");
+
+    fprintf(fp, "static uint8_t tage_useful_saved[%d] = {", num_components * (1 << 10));
+    for (int i = 0; i < num_components * (1 << 10); i++)
+        fprintf(fp, "%u,", tage_useful_ctrs[i]);
+    fprintf(fp, "};\n\n");
+
+    fprintf(fp, "static uint64_t tage_ght_saved[%d] = {", 4);
+    for (int i = 0; i < 4; i++)
+        fprintf(fp, "%llu,", (unsigned long long)tage_ght[i]);
+    fprintf(fp, "};\n\n");
+
+    fprintf(fp, "static uint16_t tage_pht_saved = %u;\n", tage_pht);
+
+    fprintf(fp, "\n#endif\n");
+    fclose(fp);
+
+    free(tage_t0);
+    free(tage_component_tags);
+    free(tage_pred_ctrs);
+    free(tage_useful_ctrs);
 }
+
 
 
 void init_predictor()
