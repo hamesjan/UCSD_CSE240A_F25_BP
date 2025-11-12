@@ -81,6 +81,9 @@ uint8_t L2 = 0;
 uint8_t L3 = 0;
 uint8_t L4 = 0;
 
+uint64_t b_count = 0; // for 256K branch reset
+uint8_t tage_alt_reset = 0;
+
 //------------------------------------//
 //        Predictor Functions         //
 //------------------------------------//
@@ -250,11 +253,9 @@ uint8_t tournament_predict(uint32_t pc){
 
 
 uint16_t pred_hash_idx(uint32_t pc, int L) {
-    const int idx_bits = 10; // 1024 entries, so need 10 bits for idx
+    uint8_t idx_bits = 10; // 1024 entries, so need 10 bits for idx
     uint16_t folded = 0;
     int pos = 0;
-
-    // XOR-fold the last L bits of the global history
     for (int i = 0; i < L; i++) {
         int word = i / 64;
         int offset = i % 64;
@@ -269,10 +270,9 @@ uint16_t pred_hash_idx(uint32_t pc, int L) {
 }
 
 uint16_t pred_hash_tag(uint32_t pc, int L) {
-    const int tag_bits = 9; // 1024 entries, so need 10 bits for idx
+    uint8_t tag_bits = 9;
     uint16_t folded = 0;
     int pos = 0;
-    // XOR-fold the last L bits of the global history
     for (int i = 0; i < L; i++) {
         int word = i / 64;
         int offset = i % 64;
@@ -282,8 +282,8 @@ uint16_t pred_hash_tag(uint32_t pc, int L) {
     }
     // Hash with PC
     uint16_t pc_lower_nine = pc & ((1 << tag_bits) - 1);
-    uint16_t index = (folded ^ pc_lower_nine) & ((1 << tag_bits) - 1); // mask
-    return index;
+    uint16_t tag = (folded ^ pc_lower_nine) & ((1 << tag_bits) - 1); // mask
+    return tag;
 }
 
 uint8_t custom_predict(uint32_t pc){
@@ -328,7 +328,6 @@ uint8_t custom_predict(uint32_t pc){
     }
 
   }
-
 
   return NOTTAKEN;
 }
@@ -416,6 +415,7 @@ void train_tournament(uint32_t pc, uint8_t outcome)
 
 void train_custom(uint32_t pc, uint8_t outcome)
 {
+  b_count++;
   uint16_t t0_idx = pc & (t0_entries - 1);
 
   uint16_t idx_list[4] = {
@@ -538,6 +538,24 @@ void train_custom(uint32_t pc, uint8_t outcome)
     ght_lsb = next_lsb;
   }
   tage_pht = (uint16_t)((pc & 1) || (tage_pht << 1)); // only update with LSB of pc
+
+  if (b_count == 256000){
+    if (!tage_alt_reset){
+      for (int i = 0; i < num_components; i++) {
+            for (int j = 0; j < tx_entries; j++) {
+                tage_useful_component[i][j] &= 0x1;
+            }
+        }
+    } else {
+      for (int i = 0; i < num_components; i++) {
+            for (int j = 0; j < tx_entries; j++) {
+                tage_useful_component[i][j] &= 0x2;
+            }
+        }
+    }
+    b_count = 0;
+    tage_alt_reset = !tage_alt_reset;
+  }
 }
 
 
