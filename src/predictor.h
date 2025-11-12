@@ -73,6 +73,7 @@ void train_predictor(uint32_t pc, uint32_t target, uint32_t outcome, uint32_t co
 #define LOCAL 0
 #define GLOBAL 0
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+void cleanup_custom();
 
 /*
 

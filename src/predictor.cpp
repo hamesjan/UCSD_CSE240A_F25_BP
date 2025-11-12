@@ -13,7 +13,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include "tage_state.h" 
 //
 // TODO:Student Information
 //
@@ -181,30 +180,17 @@ uint8_t *tage_useful_component[4];
   }
 
   // setting L values for all predictor components
-  L2 = (uint8_t)round(L1 * pow(alpha, 1)); 
-  L3 = (uint8_t)round(L1 * pow(alpha, 2));
-  L4 = (uint8_t)round(L1 * pow(alpha, 3));
+  L1 = 4;
+  L2 = 8;
+  L3 = 16;
+  L4 = 64;
   
   tage_pht = 0;
-  // on init, load previous tage state stored in tage_state.h
-  #if defined(TAGE_STATE_VALID)
-    // If tage_state.h exists and defines this macro, load previous state
-    memcpy(tage_t0, tage_t0_saved, t0_entries);
-    memcpy(tage_component_tags, tage_tags_saved, num_components * tx_entries * sizeof(uint16_t));
-    memcpy(tage_pred_ctrs, tage_pred_saved, num_components * tx_entries);
-    memcpy(tage_useful_ctrs, tage_useful_saved, num_components * tx_entries);
-    memcpy(tage_ght, tage_ght_saved, sizeof(uint64_t) * num_components);
-    tage_pht = tage_pht_saved;
-  #else
-      // Else initialize fresh
-      memset(tage_t0, 0, t0_entries);
-      memset(tage_component_tags, 0, num_components * tx_entries * sizeof(uint16_t));
-      memset(tage_pred_ctrs, 0, num_components * tx_entries);
-      memset(tage_useful_ctrs, 0, num_components * tx_entries);
-      memset(tage_ght, 0, sizeof(uint64_t) * num_components);
-      tage_pht = 0;
-  #endif
-
+  memset(tage_t0, 0, t0_entries);
+  memset(tage_component_tags, 0, num_components * tx_entries * sizeof(uint16_t));
+  memset(tage_pred_ctrs, 0, num_components * tx_entries);
+  memset(tage_useful_ctrs, 0, num_components * tx_entries);
+  memset(tage_ght, 0, sizeof(uint64_t) * num_components);
 }
 
 uint8_t gshare_predict(uint32_t pc)
@@ -430,7 +416,128 @@ void train_tournament(uint32_t pc, uint8_t outcome)
 
 void train_custom(uint32_t pc, uint8_t outcome)
 {
-  return;
+  uint16_t t0_idx = pc & (t0_entries - 1);
+
+  uint16_t idx_list[4] = {
+    pred_hash_idx(pc, L1),
+    pred_hash_idx(pc, L2),
+    pred_hash_idx(pc, L3),
+    pred_hash_idx(pc, L4)
+  };
+  uint16_t tag_list[4] = {
+    pred_hash_tag(pc, L1),
+    pred_hash_tag(pc, L2),
+    pred_hash_tag(pc, L3),
+    pred_hash_tag(pc, L4)
+  };
+
+  int provider_component = -1, alt_component = -1;
+  for (int i = num_components - 1; i >= 0; --i) {
+    if (tage_components[i][idx_list[i]] == tag_list[i]) {
+      if (provider_component == -1) {
+        // first find longest history prediction
+        provider_component = i;
+      }
+      else if (alt_component == -1) { 
+        // then find next longest prediction
+        alt_component = i; break; 
+      }
+    }
+  }
+
+  uint8_t base_prediction = tage_t0[t0_idx] >= 2;
+  uint8_t provider_pred = base_prediction;
+  uint8_t alt_pred =  base_prediction;
+  if (provider_component != -1) {
+    // if match found
+    provider_pred = (tage_pred_ctrs_component[provider_component][idx_list[provider_component]] >= 4);
+  }
+  if (alt_component != -1) {
+    // if match found for altpred
+    alt_pred = (tage_pred_ctrs_component[alt_component][idx_list[alt_component]] >= 4);
+  }
+
+  // base
+  if (outcome == TAKEN) {
+    if (tage_t0[t0_idx] < 3){
+      tage_t0[t0_idx]++;
+    } 
+  } else {
+    if (tage_t0[t0_idx] > 0){
+      tage_t0[t0_idx]--;
+    } 
+  }
+
+  // update provider counters
+  if (provider_component != -1) {
+    if (outcome == TAKEN) {
+      if (tage_pred_ctrs_component[provider_component][idx_list[provider_component]] < 7) {
+        tage_pred_ctrs_component[provider_component][idx_list[provider_component]]++;
+      }
+    } else {
+      if (tage_pred_ctrs_component[provider_component][idx_list[provider_component]] > 0) {
+        tage_pred_ctrs_component[provider_component][idx_list[provider_component]]--;
+      }
+    }
+
+    // update useful counter
+    if (provider_pred != alt_pred && provider_pred == outcome) {
+      // provider is correct, and differs from alt_pred
+      if (tage_useful_component[provider_component][idx_list[provider_component]] < 3){
+        tage_useful_component[provider_component][idx_list[provider_component]]++;
+     }
+    } 
+    else if (provider_pred != outcome) {
+      // if provider is wrong, then decrement useful
+      if (tage_useful_component[provider_component][idx_list[provider_component]] > 0){
+            tage_useful_component[provider_component][idx_list[provider_component]]--;
+      }
+    }
+  }
+
+  // allocate
+  if (provider_pred != outcome && provider_component != -1) {
+    uint8_t k = provider_component + 1;
+    uint8_t did_allocate = 0;
+    for (int i = num_components - 1; i >= k; --i) {
+      if (tage_components[i][idx_list[i]] != tag_list[i]) {
+        if (tage_useful_component[i][idx_list[i]] == 0) { // replace 
+          did_allocate = 1;
+          tage_pred_ctrs_component[i][idx_list[i]] = 4; // Weak correct
+          tage_useful_component[i][idx_list[i]] = 0; // useful 0
+          tage_components[i][idx_list[i]] = tag_list[i];
+          break;
+        }
+      }
+    }
+
+    if (!did_allocate){
+      // decrement all useful counters
+      for (int i = k; i < num_components; i++) {
+            if (tage_useful_component[i][idx_list[i]] > 0){
+                tage_useful_component[i][idx_list[i]]--;
+            }
+        }
+    }
+  } else if (provider_pred != outcome && provider_component == -1 ){
+    // used base provider
+    for (int i = 0; i < num_components; i++) {
+        if (tage_useful_component[i][idx_list[i]] == 0) {
+            tage_pred_ctrs_component[i][idx_list[i]] = 4; // Weak correct
+            tage_useful_component[i][idx_list[i]] = 0; // useful 0
+            tage_components[i][idx_list[i]] = tag_list[i];
+            break;
+        }
+    }
+  }
+
+  uint64_t ght_lsb = outcome; // shifting
+  for (int i = 0; i < num_components; i++) {
+    uint64_t next_lsb = (tage_ght[i] >> 63) & 1;
+    tage_ght[i] = (tage_ght[i] << 1) | ght_lsb;
+    ght_lsb = next_lsb;
+  }
+  tage_pht = (uint16_t)((pc & 1) || (tage_pht << 1)); // only update with LSB of pc
 }
 
 
@@ -455,48 +562,11 @@ void cleanup_tournament()
 }
 
 void cleanup_custom() {
-    FILE *fp = fopen("tage_state.h", "w");
-    if (!fp) return;
-
-    fprintf(fp, "#ifndef __TAGE_STATE_H__\n#define __TAGE_STATE_H__\n");
-    fprintf(fp, "#define TAGE_STATE_VALID\n\n");
-
-    fprintf(fp, "static uint8_t tage_t0_saved[%d] = {", 1 << 12);
-    for (int i = 0; i < (1 << 12); i++)
-        fprintf(fp, "%u,", tage_t0[i]);
-    fprintf(fp, "};\n\n");
-
-    fprintf(fp, "static uint16_t tage_tags_saved[%d] = {", num_components * (1 << 10));
-    for (int i = 0; i < num_components * (1 << 10); i++)
-        fprintf(fp, "%u,", tage_component_tags[i]);
-    fprintf(fp, "};\n\n");
-
-    fprintf(fp, "static uint8_t tage_pred_saved[%d] = {", num_components * (1 << 10));
-    for (int i = 0; i < num_components * (1 << 10); i++)
-        fprintf(fp, "%u,", tage_pred_ctrs[i]);
-    fprintf(fp, "};\n\n");
-
-    fprintf(fp, "static uint8_t tage_useful_saved[%d] = {", num_components * (1 << 10));
-    for (int i = 0; i < num_components * (1 << 10); i++)
-        fprintf(fp, "%u,", tage_useful_ctrs[i]);
-    fprintf(fp, "};\n\n");
-
-    fprintf(fp, "static uint64_t tage_ght_saved[%d] = {", 4);
-    for (int i = 0; i < 4; i++)
-        fprintf(fp, "%llu,", (unsigned long long)tage_ght[i]);
-    fprintf(fp, "};\n\n");
-
-    fprintf(fp, "static uint16_t tage_pht_saved = %u;\n", tage_pht);
-
-    fprintf(fp, "\n#endif\n");
-    fclose(fp);
-
     free(tage_t0);
     free(tage_component_tags);
     free(tage_pred_ctrs);
     free(tage_useful_ctrs);
 }
-
 
 
 void init_predictor()
